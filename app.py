@@ -7,10 +7,31 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="📊 Smart Stock Analyzer", layout="wide")
 st.title("📈 Stock Buy / Hold / Sell Analyzer")
 
-# Input ticker symbol
-ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, INFY)", "AAPL").upper()
+# ---------------------------
+# Configurable analysis windows
+# ---------------------------
+LONG_PERIOD = "3y"     # long-term analysis window (at least 3 years)
+SHORT_PERIOD = "3mo"   # short-term analysis window (at least 2–3 months)
 
-# RSI calculation function
+# --- Load ticker/name list for autocomplete (optional) ---
+# Place a CSV named 'tickers.csv' in the project folder with columns 'Ticker' and 'Name'.
+try:
+    tickers_df = pd.read_csv('tickers.csv')
+    ticker_options = tickers_df.apply(lambda x: f"{x['Ticker']} - {x['Name']}", axis=1).tolist()
+    search_input = st.text_input("Search by Ticker or Company Name:")
+    if search_input:
+        filtered = [opt for opt in ticker_options if search_input.lower() in opt.lower()]
+        if not filtered:
+            st.warning("No matches found. Please refine your search or enter a valid ticker.")
+        selected = st.selectbox("Select a Stock:", filtered if filtered else [])
+    else:
+        selected = st.selectbox("Select a Stock:", ticker_options)
+    ticker = selected.split(' - ')[0]
+except FileNotFoundError:
+    st.warning("tickers.csv not found. Falling back to manual input.")
+    ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, INFY):", "AAPL").upper()
+
+# --- RSI calculation function ---
 def calculate_rsi(data, period=14):
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
@@ -34,186 +55,179 @@ metrics_weights = {
 
 if ticker:
     stock = yf.Ticker(ticker)
-    info = stock.info
-    hist = stock.history(period="6mo")
 
-    # Header info
+    # ---------------------------
+    # Fetch fundamentals & price history
+    # ---------------------------
+    info = stock.info
+    hist_long = stock.history(period=LONG_PERIOD)   # 3 years
+    hist_short = stock.history(period=SHORT_PERIOD) # ~3 months
+
+    # Header
     st.subheader(f"**{info.get('shortName', ticker)} ({ticker})**")
     st.write(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')}")
     st.write(f"**Market Cap:** {info.get('marketCap', 0):,}")
 
-    # Metric explanations section
+    # Explanations
     st.markdown("---")
     st.header("📚 Metric Explanations")
     st.markdown("""
-- **P/E Ratio (Price-to-Earnings Ratio):** Compares a company's share price to its earnings per share. Lower values (<25) may indicate undervaluation or better value relative to earnings.
-- **EPS (Earnings Per Share):** The portion of a company's profit allocated to each outstanding share. Positive EPS signals profitability.
-- **ROE (Return on Equity):** Measures how effectively management is using equity financing to generate profits. ROE >15% indicates strong efficiency.
-- **Revenue Growth (YoY):** Year-over-year percentage increase in sales revenue. Growth >10% suggests healthy expansion.
-- **Debt-to-Equity Ratio:** Indicates the relative proportion of shareholders' equity and debt used to finance a company's assets. A ratio <1 shows conservative debt levels.
-- **MA Cross (Golden Cross):** When the 50-day moving average crosses above the 200-day moving average, it signals a potential long-term bullish trend.
-- **RSI (Relative Strength Index):** A momentum oscillator that measures speed and change of price movements. Values between 30 and 70 denote neutral momentum; above 70 is overbought, below 30 is oversold.
-- **MACD (Moving Average Convergence Divergence):** Shows the relationship between two moving averages of a security’s price. A bullish signal occurs when the MACD line crosses above the signal line.
+- **P/E Ratio (Price-to-Earnings):** Share price divided by earnings per share. Lower (<25) may indicate undervaluation.
+- **EPS (Earnings Per Share):** Net profit divided by shares outstanding. Positive signals profitability.
+- **ROE (Return on Equity):** Net income relative to shareholder equity. >15% shows efficient capital use.
+- **Revenue Growth (YoY):** Year-over-year sales increase. >10% indicates healthy expansion.
+- **Debt-to-Equity Ratio:** Company’s debt vs. equity. <1 (or <100%) means conservative leverage.
+- **MA Cross (Golden Cross):** 50-day MA surpasses 200-day MA – a bullish long-term signal. Calculated on **3-year** price history.
+- **RSI (Relative Strength Index):** Momentum oscillator (0–100). 30–70 neutral; >70 overbought; <30 oversold. Calculated on **last 3 months**.
+- **MACD (Moving Average Convergence Divergence):** Momentum via EMA differences. Bullish when MACD > signal. Calculated on **last 3 months**.
 """)
 
-    # Initialize scores and record of contributions
+    # Initialize scores and contributions
     long_term_score = 0
     short_term_score = 0
     contributions = []
-
+    # maxima for normalization
     max_long = sum([metrics_weights[m] for m in ["P/E Ratio","EPS","ROE","Revenue Growth","Debt-to-Equity","MA Cross"]])
     max_short = metrics_weights['RSI'] + metrics_weights['MACD']
 
-    # Fundamental & Long-Term Analysis
+    # ---------------------------
+    # Fundamental & Long-Term Analysis (3 YEARS)
+    # ---------------------------
     st.markdown("---")
-    st.header("🧮 Fundamental & Long-Term Analysis")
+    st.header("🧮 Fundamental & Long-Term Analysis (3 Years)")
 
-    # P/E Ratio
+    # P/E
     pe = info.get('trailingPE')
-    pe_pass = False
-    if pe:
-        st.write(f"**P/E Ratio:** {pe:.2f}")
-        pe_pass = pe < 25
-        if pe_pass:
-            long_term_score += metrics_weights['P/E Ratio']
-        contributions.append(("P/E Ratio", round(pe,2), "<25", metrics_weights['P/E Ratio'] if pe_pass else 0))
-    else:
-        st.write("**P/E Ratio:** Data not available")
-        contributions.append(("P/E Ratio", "N/A", "<25", 0))
+    pe_pass = bool(pe) and pe < 25
+    st.write(f"**P/E Ratio:** {f'{pe:.2f}' if pe else 'N/A'}")
+    contributions.append(("P/E Ratio", f"{pe:.2f}" if pe else 'N/A', '<25', metrics_weights['P/E Ratio'] if pe_pass else 0, 'Fundamental'))
+    if pe_pass:
+        long_term_score += metrics_weights['P/E Ratio']
 
     # EPS
     eps = info.get('trailingEps')
-    eps_pass = False
-    if eps:
-        st.write(f"**EPS:** {eps:.2f}")
-        eps_pass = eps > 0
-        if eps_pass:
-            long_term_score += metrics_weights['EPS']
-        contributions.append(("EPS", round(eps,2), ">0", metrics_weights['EPS'] if eps_pass else 0))
-    else:
-        st.write("**EPS:** Data not available")
-        contributions.append(("EPS", "N/A", ">0", 0))
+    eps_pass = bool(eps) and eps > 0
+    st.write(f"**EPS:** {f'{eps:.2f}' if eps else 'N/A'}")
+    contributions.append(("EPS", f"{eps:.2f}" if eps else 'N/A', '>0', metrics_weights['EPS'] if eps_pass else 0, 'Fundamental'))
+    if eps_pass:
+        long_term_score += metrics_weights['EPS']
 
     # ROE
     roe = info.get('returnOnEquity')
-    roe_pass = False
-    if roe:
-        roe_pct = roe * 100
-        st.write(f"**ROE:** {roe_pct:.2f}%")
-        roe_pass = roe > 0.15
-        if roe_pass:
-            long_term_score += metrics_weights['ROE']
-        contributions.append(("ROE (%)", round(roe_pct,2), ">15%", metrics_weights['ROE'] if roe_pass else 0))
-    else:
-        st.write("**ROE:** Data not available")
-        contributions.append(("ROE (%)", "N/A", ">15%", 0))
+    roe_pct = roe*100 if roe else None
+    roe_pass = bool(roe) and roe > 0.15
+    st.write(f"**ROE:** {f'{roe_pct:.2f}%' if roe_pct is not None else 'N/A'}")
+    contributions.append(("ROE (%)", f"{roe_pct:.2f}%" if roe_pct is not None else 'N/A', '>15%', metrics_weights['ROE'] if roe_pass else 0, 'Fundamental'))
+    if roe_pass:
+        long_term_score += metrics_weights['ROE']
 
     # Revenue Growth
-    rev_growth = info.get('revenueGrowth')
-    rev_pass = False
-    if rev_growth:
-        rev_pct = rev_growth * 100
-        st.write(f"**Revenue Growth (YoY):** {rev_pct:.2f}%")
-        rev_pass = rev_growth > 0.10
-        if rev_pass:
-            long_term_score += metrics_weights['Revenue Growth']
-        contributions.append(("Revenue Growth (%)", round(rev_pct,2), ">10%", metrics_weights['Revenue Growth'] if rev_pass else 0))
-    else:
-        st.write("**Revenue Growth (YoY):** Data not available")
-        contributions.append(("Revenue Growth (%)", "N/A", ">10%", 0))
+    rg = info.get('revenueGrowth')
+    rg_pct = rg*100 if rg else None
+    rg_pass = bool(rg) and rg > 0.10
+    st.write(f"**Revenue Growth (YoY):** {f'{rg_pct:.2f}%' if rg_pct is not None else 'N/A'}")
+    contributions.append(("Revenue Growth (%)", f"{rg_pct:.2f}%" if rg_pct is not None else 'N/A', '>10%', metrics_weights['Revenue Growth'] if rg_pass else 0, 'Fundamental'))
+    if rg_pass:
+        long_term_score += metrics_weights['Revenue Growth']
 
-    # Debt-to-Equity
+    # Debt/Equity
     de = info.get('debtToEquity')
-    de_pass = False
-    if de is not None:
-        st.write(f"**Debt-to-Equity Ratio:** {de:.2f}")
-        de_pass = de < 1
-        if de_pass:
-            long_term_score += metrics_weights['Debt-to-Equity']
-        contributions.append(("Debt-to-Equity", round(de,2), "<1", metrics_weights['Debt-to-Equity'] if de_pass else 0))
-    else:
-        st.write("**Debt-to-Equity:** Data not available")
-        contributions.append(("Debt-to-Equity", "N/A", "<1", 0))
+    de_pass = (de is not None) and (de < 1)
+    st.write(f"**Debt-to-Equity:** {de if de is not None else 'N/A'}")
+    contributions.append(("Debt-to-Equity", de if de is not None else 'N/A', '<1', metrics_weights['Debt-to-Equity'] if de_pass else 0, 'Fundamental'))
+    if de_pass:
+        long_term_score += metrics_weights['Debt-to-Equity']
 
-    # Golden Cross
-    hist['MA50'] = hist['Close'].rolling(window=50).mean()
-    hist['MA200'] = hist['Close'].rolling(window=200).mean()
-    ma_cross = hist['MA50'].iloc[-1] > hist['MA200'].iloc[-1]
-    st.write(f"**Golden Cross (MA50 > MA200):** {'Yes' if ma_cross else 'No'}")
-    ma_pass = ma_cross
-    if ma_pass:
+    # Long-term Moving Averages (computed on 3Y data)
+    hist_long = hist_long.copy()
+    hist_long['MA50'] = hist_long['Close'].rolling(50).mean()
+    hist_long['MA200'] = hist_long['Close'].rolling(200).mean()
+    ma_cross = bool(len(hist_long) > 200) and (hist_long['MA50'].iloc[-1] > hist_long['MA200'].iloc[-1])
+    st.write(f"**Golden Cross (50D > 200D on {LONG_PERIOD} data):** {'Yes' if ma_cross else 'No'}")
+    contributions.append(("Golden Cross", 'Yes' if ma_cross else 'No', 'Yes', metrics_weights['MA Cross'] if ma_cross else 0, f'Price ({LONG_PERIOD})'))
+    if ma_cross:
         long_term_score += metrics_weights['MA Cross']
-    contributions.append(("Golden Cross", 'Yes' if ma_cross else 'No', "Yes", metrics_weights['MA Cross'] if ma_pass else 0))
 
-    # Short-Term Technical Analysis
+    # ---------------------------
+    # Short-Term Technical Analysis (LAST 3 MONTHS)
+    # ---------------------------
     st.markdown("---")
-    st.header("📈 Short-Term Technical Analysis")
+    st.header("📈 Short-Term Technical Analysis (Last 3 Months)")
 
-    # RSI
-    hist['RSI'] = calculate_rsi(hist)
-    rsi = hist['RSI'].dropna()
-    rsi_val = rsi.iloc[-1] if not rsi.empty else None
-    st.write(f"**RSI (Last 6mo):** {round(rsi_val,2) if rsi_val else 'N/A'}")
-    rsi_pass = rsi_val and 30 < rsi_val < 70
+    # RSI / MACD on short window
+    hist_short = hist_short.copy()
+    hist_short['RSI'] = calculate_rsi(hist_short)
+    rsi_series = hist_short['RSI'].dropna()
+    rsi_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else None
+    rsi_pass = (rsi_val is not None) and (30 < rsi_val < 70)
+    st.write(f"**RSI:** {round(rsi_val,2) if rsi_val is not None else 'N/A'}")
+    contributions.append(("RSI", round(rsi_val,2) if rsi_val is not None else 'N/A', '30-70', metrics_weights['RSI'] if rsi_pass else 0, f'Price ({SHORT_PERIOD})'))
     if rsi_pass:
         short_term_score += metrics_weights['RSI']
-    contributions.append(("RSI", round(rsi_val,2) if rsi_val else 'N/A', "30-70", metrics_weights['RSI'] if rsi_pass else 0))
 
-    # MACD
-    macd_line = hist['Close'].ewm(span=12, adjust=False).mean() - hist['Close'].ewm(span=26, adjust=False).mean()
+    macd_line = hist_short['Close'].ewm(span=12, adjust=False).mean() - hist_short['Close'].ewm(span=26, adjust=False).mean()
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    macd_pass = macd_line.iloc[-1] > signal_line.iloc[-1]
-    st.write(f"**MACD vs Signal:** {'Bullish' if macd_pass else 'Bearish'}")
+    macd_pass = (len(macd_line.dropna())>0 and len(signal_line.dropna())>0 and macd_line.iloc[-1] > signal_line.iloc[-1])
+    st.write(f"**MACD Signal:** {'Bullish' if macd_pass else 'Bearish'}")
+    contributions.append(("MACD", 'Bullish' if macd_pass else 'Bearish', 'Bullish', metrics_weights['MACD'] if macd_pass else 0, f'Price ({SHORT_PERIOD})'))
     if macd_pass:
         short_term_score += metrics_weights['MACD']
-    contributions.append(("MACD", 'Bullish' if macd_pass else 'Bearish', "Bullish", metrics_weights['MACD'] if macd_pass else 0))
 
-    # Calculation Details Table
+    # ---------------------------
+    # Calculation Details (show windows used)
+    # ---------------------------
     st.markdown("---")
-    st.header("🔢 Calculation Details")
-    df_calc = pd.DataFrame(contributions, columns=['Metric','Value','Threshold','Contribution'])
-    st.table(df_calc)
+    st.header("🔢 Calculation Details & Contributions")
+    df = pd.DataFrame(contributions, columns=['Metric','Value','Threshold','Contribution','Window'])
+    st.table(df)
 
-    # Charts
+    # ---------------------------
+    # Charts: small, two per row
+    # ---------------------------
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("RSI Chart")
+        st.subheader(f"Price Trend – Long Term ({LONG_PERIOD})")
         fig1, ax1 = plt.subplots(figsize=(4,3))
-        rsi.plot(ax=ax1)
-        ax1.axhline(70, linestyle='--')
-        ax1.axhline(30, linestyle='--')
+        hist_long['Close'].plot(ax=ax1)
         st.pyplot(fig1)
     with col2:
-        st.subheader("MACD Chart")
+        st.subheader(f"50D & 200D MAs – ({LONG_PERIOD})")
         fig2, ax2 = plt.subplots(figsize=(4,3))
-        macd_line.plot(ax=ax2, label='MACD')
-        signal_line.plot(ax=ax2, label='Signal')
+        hist_long['Close'].plot(ax=ax2, label='Close')
+        hist_long['MA50'].plot(ax=ax2, label='MA50')
+        hist_long['MA200'].plot(ax=ax2, label='MA200')
         ax2.legend()
         st.pyplot(fig2)
 
     col3, col4 = st.columns(2)
     with col3:
-        st.subheader("Price Trend")
+        st.subheader(f"RSI – Short Term ({SHORT_PERIOD})")
         fig3, ax3 = plt.subplots(figsize=(4,3))
-        hist['Close'].plot(ax=ax3)
+        if not rsi_series.empty:
+            rsi_series.plot(ax=ax3)
+        ax3.axhline(70, linestyle='--')
+        ax3.axhline(30, linestyle='--')
         st.pyplot(fig3)
     with col4:
-        st.subheader("Moving Averages")
+        st.subheader(f"MACD – Short Term ({SHORT_PERIOD})")
         fig4, ax4 = plt.subplots(figsize=(4,3))
-        hist['Close'].plot(ax=ax4, label='Close')
-        hist['MA50'].plot(ax=ax4, label='MA50')
-        hist['MA200'].plot(ax=ax4, label='MA200')
+        macd_line.plot(ax=ax4, label='MACD')
+        signal_line.plot(ax=ax4, label='Signal')
         ax4.legend()
         st.pyplot(fig4)
 
-    # Final Recommendations
+    # ---------------------------
+    # Final Recommendations (separate LT/ ST)
+    # ---------------------------
     st.markdown("---")
     st.header("🧠 Final Recommendations")
     long_pct = int((long_term_score / max_long) * 100)
     short_pct = int((short_term_score / max_short) * 100)
 
-    lt_rec = "✅ Long-Term: Strong Buy" if long_pct >= 75 else ("➖ Long-Term: Hold" if long_pct >= 50 else "❌ Long-Term: Sell")
-    st_rec = "✅ Short-Term: Strong Buy" if short_pct >= 75 else ("➖ Short-Term: Hold" if short_pct >= 50 else "❌ Short-Term: Sell")
+    lt_rec = '✅ Long-Term: Strong Buy' if long_pct >= 75 else ('➖ Long-Term: Hold' if long_pct >= 50 else '❌ Long-Term: Sell')
+    st_rec_val = '✅ Short-Term: Strong Buy' if short_pct >= 75 else ('➖ Short-Term: Hold' if short_pct >= 50 else '❌ Short-Term: Sell')
 
-    st.write(f"**Long-Term Score:** {long_pct}% | Recommendation: {lt_rec}")
-    st.write(f"**Short-Term Score:** {short_pct}% | Recommendation: {st_rec}")
+    st.write(f"**Long-Term Score:** {long_pct}% → {lt_rec}")
+    st.write(f"**Short-Term Score:** {short_pct}% → {st_rec_val}")
+
+    st.caption("Long-term signals use **3 years** of price data; short-term signals use **~3 months**. Fundamentals are based on the latest reported financials.")
